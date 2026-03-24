@@ -28,6 +28,7 @@ import (
 
 var (
 	envVarKeyRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	gitShaRegex    = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 )
 
 // validateEnvVarKey validates environment variable key format using regexp
@@ -67,6 +68,14 @@ func validateAnnotationsMap(annotations map[string]string) error {
 		return fmt.Errorf("annotations validation failed: %s", strings.Join(errMessages, "; "))
 	}
 
+	return nil
+}
+
+// validateGitSha validates that the given string is a valid git commit SHA (7-40 hex characters)
+func validateGitSha(sha string) error {
+	if !gitShaRegex.MatchString(sha) {
+		return fmt.Errorf("git SHA %q is invalid: must be 7-40 lowercase hex characters", sha)
+	}
 	return nil
 }
 
