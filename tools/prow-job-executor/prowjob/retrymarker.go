@@ -148,8 +148,9 @@ func (r RetryEligibility) String() string {
 	}
 }
 
-// retryEligibilityFrom translates the known-issue eligibility decided for a step whose
-// finished.json did carry ev2FailedTestsKey (found=true) into a RetryEligibility.
+// retryEligibilityFrom translates the known-issue eligibility already decided by the caller
+// (ev2RetryEligibleFromFinishedJSON, only once it has confirmed the candidate finished.json
+// carried ev2FailedTestsKey) into a RetryEligibility.
 func retryEligibilityFrom(eligible bool) RetryEligibility {
 	if eligible {
 		return KnownIssueEligible
