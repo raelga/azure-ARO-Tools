@@ -394,6 +394,22 @@ func TestFetchFinishedJSONAllowsRetryRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestRetryEligibilityString(t *testing.T) {
+	for _, tc := range []struct {
+		val  RetryEligibility
+		want string
+	}{
+		{NotEligible, "NotEligible"},
+		{KnownIssueEligible, "KnownIssueEligible"},
+		{InfraPreconditionEligible, "InfraPreconditionEligible"},
+		{RetryEligibility(99), "RetryEligibility(99)"},
+	} {
+		if got := tc.val.String(); got != tc.want {
+			t.Errorf("RetryEligibility(%d).String() = %q, want %q", tc.val, got, tc.want)
+		}
+	}
+}
+
 func TestEV2RetryEligible(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

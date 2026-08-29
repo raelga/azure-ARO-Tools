@@ -114,9 +114,11 @@ func finishedJSONURLFromViewURL(viewURL string) (string, error) {
 type RetryEligibility int
 
 const (
-	// NotEligible means the failure doesn't qualify for any automatic EV2 retry: either no
-	// step's finished.json metadata said it was safe to retry, or an error occurred while
-	// checking.
+	// NotEligible means a step's finished.json did carry ev2FailedTestsKey (so
+	// aro-hcp-tests ran and reported results), but the reported failures aren't eligible
+	// per ev2RetryEligible (too many, or one wasn't labeled allow-retry) - or an error
+	// occurred while checking. This is distinct from InfraPreconditionEligible, which
+	// covers the case where no step ever reported results at all.
 	NotEligible RetryEligibility = iota
 	// KnownIssueEligible means the aro-hcp-tests step ran and reported its results, and
 	// every failed spec was labeled allow-retry and within the configured cap (see
@@ -130,6 +132,21 @@ const (
 	// failures are.
 	InfraPreconditionEligible
 )
+
+// String renders a RetryEligibility as a stable, readable name (rather than a bare
+// integer) for log messages and test failure output.
+func (r RetryEligibility) String() string {
+	switch r {
+	case NotEligible:
+		return "NotEligible"
+	case KnownIssueEligible:
+		return "KnownIssueEligible"
+	case InfraPreconditionEligible:
+		return "InfraPreconditionEligible"
+	default:
+		return fmt.Sprintf("RetryEligibility(%d)", int(r))
+	}
+}
 
 // retryEligibilityFrom translates the known-issue eligibility decided for a step whose
 // finished.json did carry ev2FailedTestsKey (found=true) into a RetryEligibility.
