@@ -19,13 +19,16 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-openapi/strfmt"
 	goapi "github.com/grafana/grafana-openapi-client-go/client"
 	"github.com/grafana/grafana-openapi-client-go/client/dashboards"
@@ -34,6 +37,8 @@ import (
 	"github.com/grafana/grafana-openapi-client-go/client/search"
 	"github.com/grafana/grafana-openapi-client-go/models"
 	gtransport "github.com/grafana/grafana-openapi-client-go/pkg/transport"
+
+	"k8s.io/utils/set"
 
 	"github.com/Azure/ARO-Tools/tools/grafanactl/internal/azure"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -234,6 +239,58 @@ func (c *Client) DeleteDataSource(ctx context.Context, dataSourceName string) er
 	}
 
 	return nil
+}
+
+// DeleteStaleDatasources lists all Grafana datasources and deletes any
+// Managed_Prometheus_* datasource whose workspace name is not in
+// validWorkspaceNames. All errors are collected and returned together.
+func (c *Client) DeleteStaleDatasources(ctx context.Context, logger logr.Logger, validWorkspaceNames set.Set[string], dryRun bool) error {
+	datasources, err := c.ListDataSources(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list Grafana datasources: %w", err)
+	}
+
+	var deleteErrors error
+	for _, ds := range datasources {
+		if ds.Type != "prometheus" {
+			continue
+		}
+
+		workspaceName := strings.TrimPrefix(ds.Name, "Managed_Prometheus_")
+		if validWorkspaceNames.Has(strings.ToLower(workspaceName)) {
+			logger.Info("Keeping datasource", "datasource-name", ds.Name)
+			continue
+		}
+
+		if dryRun {
+			logger.Info("Dry run - would delete stale datasource", "datasource-name", ds.Name)
+			continue
+		}
+
+		logger.Info("Deleting stale datasource", "datasource-name", ds.Name)
+		if err := c.DeleteDataSource(ctx, ds.Name); err != nil {
+			deleteErrors = errors.Join(deleteErrors, fmt.Errorf("failed to delete datasource %q: %w", ds.Name, err))
+		}
+	}
+
+	if deleteErrors != nil {
+		return fmt.Errorf("failed to delete stale datasources: %w", deleteErrors)
+	}
+
+	return nil
+}
+
+// WorkspaceNamesFromResourceIDs extracts workspace names (the last path
+// segment) from a set of Azure resource IDs and returns them lowercased.
+func WorkspaceNamesFromResourceIDs(ids set.Set[string]) set.Set[string] {
+	names := set.New[string]()
+	for _, id := range ids.UnsortedList() {
+		name := path.Base(id)
+		if name != "" && name != "." {
+			names.Insert(strings.ToLower(name))
+		}
+	}
+	return names
 }
 
 // ListFolders returns all folders in the Grafana instance.

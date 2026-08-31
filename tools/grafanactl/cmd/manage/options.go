@@ -23,6 +23,7 @@ import (
 	"github.com/Azure/ARO-Tools/tools/cmdutils"
 	"github.com/Azure/ARO-Tools/tools/grafanactl/cmd/base"
 	"github.com/Azure/ARO-Tools/tools/grafanactl/internal/azure"
+	"github.com/Azure/ARO-Tools/tools/grafanactl/internal/grafana"
 )
 
 // RawReconcileOptions represents the initial, unvalidated configuration for reconcile operations.
@@ -50,6 +51,7 @@ type ValidatedReconcileOptions struct {
 // for reconcile operations.
 type CompletedReconcileOptions struct {
 	*validatedReconcileOptions
+	GrafanaClient                *grafana.Client
 	ManagedGrafanaClient         *azure.ManagedGrafanaClient
 	ResourceGraphDiscoveryClient *azure.ResourceGraphDiscoveryClient
 }
@@ -126,6 +128,11 @@ func (o *ValidatedReconcileOptions) Complete(ctx context.Context) (*CompletedRec
 		return nil, fmt.Errorf("failed to create managed Grafana client: %w", err)
 	}
 
+	grafanaClient, err := grafana.NewClient(ctx, cred, managedGrafanaClient, o.SubscriptionID, o.ResourceGroup, o.GrafanaName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Grafana client: %w", err)
+	}
+
 	resourceGraphClient, err := azure.NewResourceGraphDiscoveryClient(cred, clientOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Resource Graph discovery client: %w", err)
@@ -133,6 +140,7 @@ func (o *ValidatedReconcileOptions) Complete(ctx context.Context) (*CompletedRec
 
 	return &CompletedReconcileOptions{
 		validatedReconcileOptions:    o.validatedReconcileOptions,
+		GrafanaClient:                grafanaClient,
 		ManagedGrafanaClient:         managedGrafanaClient,
 		ResourceGraphDiscoveryClient: resourceGraphClient,
 	}, nil
