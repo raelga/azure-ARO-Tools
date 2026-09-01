@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/utils/set"
 
+	"github.com/Azure/ARO-Tools/tools/grafanactl/internal/grafana"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dashboard/armdashboard/v2"
 )
 
@@ -110,7 +111,7 @@ func (o *CompletedAddDatasourceOptions) Run(ctx context.Context) error {
 
 	logger.Info("add datasource command executed")
 
-	grafana, err := o.ManagedGrafanaClient.GetGrafanaInstance(ctx, o.ResourceGroup, o.GrafanaName)
+	grafanaInstance, err := o.ManagedGrafanaClient.GetGrafanaInstance(ctx, o.ResourceGroup, o.GrafanaName)
 	if err != nil {
 		return fmt.Errorf("failed to get Grafana instance: %w", err)
 	}
@@ -122,8 +123,8 @@ func (o *CompletedAddDatasourceOptions) Run(ctx context.Context) error {
 
 	integrationList := set.New[string]()
 	var existingIntegrations []*armdashboard.AzureMonitorWorkspaceIntegration
-	if grafana.Properties != nil && grafana.Properties.GrafanaIntegrations != nil {
-		existingIntegrations = grafana.Properties.GrafanaIntegrations.AzureMonitorWorkspaceIntegrations
+	if grafanaInstance.Properties != nil && grafanaInstance.Properties.GrafanaIntegrations != nil {
+		existingIntegrations = grafanaInstance.Properties.GrafanaIntegrations.AzureMonitorWorkspaceIntegrations
 	}
 	for _, integration := range existingIntegrations {
 		if integration == nil || integration.AzureMonitorWorkspaceResourceID == nil {
@@ -146,14 +147,19 @@ func (o *CompletedAddDatasourceOptions) Run(ctx context.Context) error {
 
 	if o.DryRun {
 		logger.Info("Dry run - would reconcile Azure Monitor Workspace integrations", "total-integrations", integrationList.Len())
-		return nil
+	} else {
+		logger.Info("Reconciling Azure Monitor Workspace integrations", "total-integrations", integrationList.Len())
+
+		err = o.ManagedGrafanaClient.UpdateGrafanaIntegrations(ctx, o.ResourceGroup, o.GrafanaName, integrationList.UnsortedList())
+		if err != nil {
+			return fmt.Errorf("failed to update Grafana integrations: %w", err)
+		}
 	}
 
-	logger.Info("Reconciling Azure Monitor Workspace integrations", "total-integrations", integrationList.Len())
-
-	err = o.ManagedGrafanaClient.UpdateGrafanaIntegrations(ctx, o.ResourceGroup, o.GrafanaName, integrationList.UnsortedList())
-	if err != nil {
-		return fmt.Errorf("failed to update Grafana integrations: %w", err)
+	validWorkspaceNames := grafana.WorkspaceNamesFromResourceIDs(integrationList)
+	logger.Info("Reconciling datasources", "valid-workspaces", validWorkspaceNames.Len())
+	if err := o.GrafanaClient.DeleteStaleDatasources(ctx, logger, validWorkspaceNames, o.DryRun); err != nil {
+		return fmt.Errorf("failed to delete stale datasources: %w", err)
 	}
 
 	return nil

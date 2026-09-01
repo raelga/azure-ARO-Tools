@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/utils/set"
 
+	"github.com/Azure/ARO-Tools/tools/grafanactl/internal/grafana"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dashboard/armdashboard/v2"
@@ -158,29 +159,34 @@ func (o *CompletedReconcileOptions) Run(ctx context.Context) error {
 			"public-network-access", o.PublicNetworkAccess,
 			"integrations", workspaceIDs.Len(),
 		)
-		return nil
+	} else {
+		result, err := o.ManagedGrafanaClient.CreateOrUpdateGrafanaInstance(ctx, o.ResourceGroup, o.GrafanaName, grafanaResource)
+		if err != nil {
+			return fmt.Errorf("failed to create/update Grafana instance: %w", err)
+		}
+
+		principalID := ""
+		if result.Identity != nil && result.Identity.PrincipalID != nil {
+			principalID = *result.Identity.PrincipalID
+		}
+
+		resultID := ""
+		if result.ID != nil {
+			resultID = *result.ID
+		}
+
+		logger.Info("Grafana instance reconciled",
+			"id", resultID,
+			"principal-id", principalID,
+			"integrations", workspaceIDs.Len(),
+		)
 	}
 
-	result, err := o.ManagedGrafanaClient.CreateOrUpdateGrafanaInstance(ctx, o.ResourceGroup, o.GrafanaName, grafanaResource)
-	if err != nil {
-		return fmt.Errorf("failed to create/update Grafana instance: %w", err)
+	validWorkspaceNames := grafana.WorkspaceNamesFromResourceIDs(workspaceIDs)
+	logger.Info("Reconciling datasources", "valid-workspaces", validWorkspaceNames.Len())
+	if err := o.GrafanaClient.DeleteStaleDatasources(ctx, logger, validWorkspaceNames, o.DryRun); err != nil {
+		return fmt.Errorf("failed to delete stale datasources: %w", err)
 	}
-
-	principalID := ""
-	if result.Identity != nil && result.Identity.PrincipalID != nil {
-		principalID = *result.Identity.PrincipalID
-	}
-
-	resultID := ""
-	if result.ID != nil {
-		resultID = *result.ID
-	}
-
-	logger.Info("Grafana instance reconciled",
-		"id", resultID,
-		"principal-id", principalID,
-		"integrations", workspaceIDs.Len(),
-	)
 
 	return nil
 }

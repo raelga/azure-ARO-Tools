@@ -16,12 +16,13 @@ package clean
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+
+	"k8s.io/utils/set"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dashboard/armdashboard/v2"
 )
@@ -182,44 +183,23 @@ func (opts *RawCleanDatasourcesOptions) RunFixup(ctx context.Context) error {
 func (o *CompletedCleanDatasourcesOptions) RunFixup(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	logger.Info("clean command executed", "dry-run", o.DryRun)
-
-	datasources, err := o.GrafanaClient.ListDataSources(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list datasources: %w", err)
-	}
+	logger.Info("fixup-datasources command executed", "dry-run", o.DryRun)
 
 	monitorWorkspaces, err := o.MonitorWorkspaceClient.GetAllMonitorWorkspaces(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list Prometheus instances: %w", err)
+		return fmt.Errorf("failed to list Azure Monitor Workspaces: %w", err)
 	}
 
-	activePrometheusResourceNames := make(map[string]bool)
-	for _, monitorWorkspace := range monitorWorkspaces {
-		activePrometheusResourceNames[strings.ToLower(*monitorWorkspace.Name)] = true
-	}
-
-	var deleteErrors error
-	for _, datasource := range datasources {
-		if datasource.Type == "prometheus" {
-			nameSuffix := strings.TrimPrefix(datasource.Name, "Managed_Prometheus_")
-			if activePrometheusResourceNames[strings.ToLower(nameSuffix)] {
-				logger.Info("Keeping datasource", "name", datasource.Name)
-			} else {
-				logger.Info("Deleting datasource", "name", datasource.Name)
-				if o.DryRun {
-					logger.Info("Dry run - would delete datasource", "name", datasource.Name)
-					continue
-				}
-				err := o.GrafanaClient.DeleteDataSource(ctx, datasource.Name)
-				if err != nil {
-					deleteErrors = errors.Join(deleteErrors, fmt.Errorf("failed to delete datasource: %w", err))
-				}
-			}
+	validWorkspaceNames := set.New[string]()
+	for _, ws := range monitorWorkspaces {
+		if ws.Name != nil {
+			validWorkspaceNames.Insert(strings.ToLower(*ws.Name))
 		}
 	}
-	if deleteErrors != nil {
-		return fmt.Errorf("failed to delete datasources: %w", deleteErrors)
+
+	logger.Info("Reconciling datasources", "valid-workspaces", validWorkspaceNames.Len())
+	if err := o.GrafanaClient.DeleteStaleDatasources(ctx, logger, validWorkspaceNames, o.DryRun); err != nil {
+		return fmt.Errorf("failed to delete stale datasources: %w", err)
 	}
 
 	return nil
