@@ -73,12 +73,12 @@ func TestExecuteAndWaitFailsWithMarkerWhenEligible(t *testing.T) {
 
 	var markerChecks int32
 	m := NewMonitor(client, time.Millisecond, time.Second, false, true, true, DefaultMaxEV2AutoRetryFailures)
-	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (bool, error) {
+	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (RetryEligibility, error) {
 		atomic.AddInt32(&markerChecks, 1)
 		if !strings.Contains(jobURL, "job-1") {
 			t.Fatalf("expected marker check against the failed job, got %q", jobURL)
 		}
-		return true, nil
+		return KnownIssueEligible, nil
 	}
 
 	err := m.ExecuteAndWait(testContext(), logr.Discard(), &prowgangway.CreateJobExecutionRequest{})
@@ -100,12 +100,36 @@ func TestExecuteAndWaitFailsWithMarkerWhenEligible(t *testing.T) {
 	}
 }
 
+func TestExecuteAndWaitFailsWithInfraMarkerWhenNoStepRanTests(t *testing.T) {
+	client, submitCount := newTestServers(t, []string{"failure"})
+
+	m := NewMonitor(client, time.Millisecond, time.Second, false, true, true, DefaultMaxEV2AutoRetryFailures)
+	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (RetryEligibility, error) {
+		return InfraPreconditionEligible, nil
+	}
+
+	err := m.ExecuteAndWait(testContext(), logr.Discard(), &prowgangway.CreateJobExecutionRequest{})
+	if err == nil {
+		t.Fatal("expected an error even when the failure is retry-eligible - prow-job-executor never resubmits the job itself")
+	}
+	var infraRetryable *EV2InfraRetryableError
+	if !errors.As(err, &infraRetryable) {
+		t.Fatalf("expected an EV2InfraRetryableError so EV2's automatedRetry can match on it, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), EV2InfraRetryableMarker) {
+		t.Fatalf("expected the error text to contain %q, got %q", EV2InfraRetryableMarker, err.Error())
+	}
+	if got := atomic.LoadInt32(submitCount); got != 1 {
+		t.Fatalf("expected exactly 1 submission (prow-job-executor must not resubmit), got %d", got)
+	}
+}
+
 func TestExecuteAndWaitFailsPlainWhenMarkerAbsent(t *testing.T) {
 	client, submitCount := newTestServers(t, []string{"failure"})
 
 	m := NewMonitor(client, time.Millisecond, time.Second, false, true, true, DefaultMaxEV2AutoRetryFailures)
-	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (bool, error) {
-		return false, nil
+	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (RetryEligibility, error) {
+		return NotEligible, nil
 	}
 
 	err := m.ExecuteAndWait(testContext(), logr.Discard(), &prowgangway.CreateJobExecutionRequest{})
@@ -116,6 +140,10 @@ func TestExecuteAndWaitFailsPlainWhenMarkerAbsent(t *testing.T) {
 	if errors.As(err, &retryable) {
 		t.Fatalf("expected a plain error (not EV2-retryable) when the failure is not eligible, got: %v", err)
 	}
+	var infraRetryable *EV2InfraRetryableError
+	if errors.As(err, &infraRetryable) {
+		t.Fatalf("expected a plain error (not EV2-infra-retryable) when the failure is not eligible, got: %v", err)
+	}
 	if got := atomic.LoadInt32(submitCount); got != 1 {
 		t.Fatalf("expected exactly 1 submission, got %d", got)
 	}
@@ -125,9 +153,9 @@ func TestExecuteAndWaitSkipsMarkerCheckWhenNotAllowed(t *testing.T) {
 	client, submitCount := newTestServers(t, []string{"failure"})
 
 	m := NewMonitor(client, time.Millisecond, time.Second, false, true, false, DefaultMaxEV2AutoRetryFailures)
-	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (bool, error) {
+	m.checkRetryMarker = func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (RetryEligibility, error) {
 		t.Fatal("checkRetryMarker should not be called when allowEV2Retry is false")
-		return false, nil
+		return NotEligible, nil
 	}
 
 	err := m.ExecuteAndWait(testContext(), logr.Discard(), &prowgangway.CreateJobExecutionRequest{})

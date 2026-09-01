@@ -108,9 +108,58 @@ func finishedJSONURLFromViewURL(viewURL string) (string, error) {
 	return fmt.Sprintf("%s/%s/finished.json", gcsObjectBaseURL, gcsPath), nil
 }
 
+// RetryEligibility classifies why (if at all) a failed gating job qualifies for an
+// automatic EV2 retry. jobAllowsEV2Retry is the only producer of this type; ExecuteAndWait
+// switches on it to decide which retryable error (if any) to fail with.
+type RetryEligibility int
+
+const (
+	// NotEligible means a step's finished.json did carry ev2FailedTestsKey (so
+	// aro-hcp-tests ran and reported results), but the reported failures aren't eligible
+	// per ev2RetryEligible (too many, or one wasn't labeled allow-retry) - or an error
+	// occurred while checking. This is distinct from InfraPreconditionEligible, which
+	// covers the case where no step ever reported results at all.
+	NotEligible RetryEligibility = iota
+	// KnownIssueEligible means the aro-hcp-tests step ran and reported its results, and
+	// every failed spec was labeled allow-retry and within the configured cap (see
+	// ev2RetryEligible and AROSLSRE-1721).
+	KnownIssueEligible
+	// InfraPreconditionEligible means no step's finished.json carried ev2FailedTestsKey at
+	// all, anywhere under the build - the aro-hcp-tests step never got far enough to write
+	// its metadata. This covers failures in shared multi-stage pre-steps (e.g.
+	// aro-hcp-lease-acquire exhausting the e2e slot pool) that happen before any test runs
+	// and so can't be attributed to a per-test allow-retry label the way KnownIssueEligible
+	// failures are.
+	InfraPreconditionEligible
+)
+
+// String renders a RetryEligibility as a stable, readable name (rather than a bare
+// integer) for log messages and test failure output.
+func (r RetryEligibility) String() string {
+	switch r {
+	case NotEligible:
+		return "NotEligible"
+	case KnownIssueEligible:
+		return "KnownIssueEligible"
+	case InfraPreconditionEligible:
+		return "InfraPreconditionEligible"
+	default:
+		return fmt.Sprintf("RetryEligibility(%d)", int(r))
+	}
+}
+
+// retryEligibilityFrom translates the known-issue eligibility already decided by the caller
+// (ev2RetryEligibleFromFinishedJSON, only once it has confirmed the candidate finished.json
+// carried ev2FailedTestsKey) into a RetryEligibility.
+func retryEligibilityFrom(eligible bool) RetryEligibility {
+	if eligible {
+		return KnownIssueEligible
+	}
+	return NotEligible
+}
+
 // jobAllowsEV2Retry fetches finished.json for the job reported at viewURL and reports
-// whether its ev2FailedTestsKey/ev2AllowRetryTestsKey metadata qualifies for an automatic
-// EV2 gating retry, per ev2RetryEligible.
+// whether it qualifies for an automatic EV2 gating retry, and why.
 //
 // ARO-HCP e2e jobs are multi-stage ci-operator tests (lease-acquire, write-config, the
 // actual test container, gather-*, lease-release, ...). Prow's sidecar merges each step's
@@ -125,32 +174,45 @@ func finishedJSONURLFromViewURL(viewURL string) (string, error) {
 // sufficient on its own for any job shape where ci-operator does aggregate it there - and
 // only pay for listing the build's artifacts/ tree when that candidate doesn't carry
 // ev2FailedTestsKey at all.
-func jobAllowsEV2Retry(ctx context.Context, viewURL string, maxAutoRetryFailures int) (bool, error) {
+//
+// If, after checking every candidate, none of them ever carried ev2FailedTestsKey, that
+// means the aro-hcp-tests step itself never ran (or crashed before writing its metadata) -
+// this reports InfraPreconditionEligible rather than NotEligible, since a pre-test infra
+// failure (like lease-acquire's e2e slot pool being exhausted, AROSLSRE-1938) is a distinct,
+// still-safe-to-retry-once class of failure from an ordinary per-test one.
+func jobAllowsEV2Retry(ctx context.Context, viewURL string, maxAutoRetryFailures int) (RetryEligibility, error) {
 	jobFinishedURL, err := finishedJSONURLFromViewURL(viewURL)
 	if err != nil {
-		return false, err
+		return NotEligible, err
 	}
 
 	if eligible, done, err := ev2RetryEligibleFromFinishedJSON(ctx, jobFinishedURL, maxAutoRetryFailures); done {
-		return eligible, err
+		if err != nil {
+			return NotEligible, err
+		}
+		return retryEligibilityFrom(eligible), nil
 	}
 
 	bucket, buildPath, err := gcsBucketAndBuildPath(jobFinishedURL)
 	if err != nil {
-		return false, err
+		return NotEligible, err
 	}
 	stepURLs, err := listStepFinishedJSONURLs(ctx, bucket, buildPath)
 	if err != nil {
-		return false, err
+		return NotEligible, err
 	}
 	for _, rawURL := range stepURLs {
 		if eligible, done, err := ev2RetryEligibleFromFinishedJSON(ctx, rawURL, maxAutoRetryFailures); done {
-			return eligible, err
+			if err != nil {
+				return NotEligible, err
+			}
+			return retryEligibilityFrom(eligible), nil
 		}
 	}
-	// No candidate finished.json carried ev2FailedTestsKey at all - the aro-hcp-tests
-	// step either never ran or its metadata write failed. Nothing to retry.
-	return false, nil
+	// No candidate finished.json carried ev2FailedTestsKey at all - the aro-hcp-tests step
+	// never got far enough to report its results. Treat this as an infra precondition
+	// failure, not "nothing to retry".
+	return InfraPreconditionEligible, nil
 }
 
 // ev2RetryEligibleFromFinishedJSON fetches rawURL and, only if its metadata carries

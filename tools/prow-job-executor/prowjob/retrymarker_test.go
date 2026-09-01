@@ -197,14 +197,15 @@ func TestJobAllowsEV2RetryFindsStepLevelMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !got {
-		t.Fatal("got false, want true: the step-level finished.json carries a single allow-retry failure")
+	if got != KnownIssueEligible {
+		t.Fatalf("got %v, want KnownIssueEligible: the step-level finished.json carries a single allow-retry failure", got)
 	}
 }
 
 func TestJobAllowsEV2RetryNoStepCarriesMetadata(t *testing.T) {
-	// If nothing under artifacts/ (nor the job-level finished.json) carries
-	// ev2FailedTestsKey at all, there's nothing to retry - and it's not an error.
+	// If nothing under artifacts/ (nor the job-level finished.json) ever carries
+	// ev2FailedTestsKey at all, the aro-hcp-tests step never ran - this is a pre-test
+	// infra failure (e.g. lease-acquire capacity exhaustion), not "nothing to retry".
 	const bucket = "test-platform-results"
 	const buildPath = "logs/some-job/1"
 
@@ -227,8 +228,8 @@ func TestJobAllowsEV2RetryNoStepCarriesMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got {
-		t.Fatal("got true, want false: no candidate finished.json carried ev2-failed-tests")
+	if got != InfraPreconditionEligible {
+		t.Fatalf("got %v, want InfraPreconditionEligible: no candidate finished.json carried ev2-failed-tests", got)
 	}
 }
 
@@ -251,8 +252,8 @@ func TestJobAllowsEV2RetryUsesJobLevelMetadataWhenPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got {
-		t.Fatal("got true, want false: job-level metadata reports a clean run")
+	if got != NotEligible {
+		t.Fatalf("got %v, want NotEligible: job-level metadata reports a clean run", got)
 	}
 }
 
@@ -390,6 +391,22 @@ func TestFetchFinishedJSONAllowsRetryRejectsOversizedBody(t *testing.T) {
 	_, err := fetchFinishedJSONAllowsRetry(testContext(), srv.URL, DefaultMaxEV2AutoRetryFailures)
 	if err == nil {
 		t.Fatal("expected an error from the oversized body, got nil")
+	}
+}
+
+func TestRetryEligibilityString(t *testing.T) {
+	for _, tc := range []struct {
+		val  RetryEligibility
+		want string
+	}{
+		{NotEligible, "NotEligible"},
+		{KnownIssueEligible, "KnownIssueEligible"},
+		{InfraPreconditionEligible, "InfraPreconditionEligible"},
+		{RetryEligibility(99), "RetryEligibility(99)"},
+	} {
+		if got := tc.val.String(); got != tc.want {
+			t.Errorf("RetryEligibility(%d).String() = %q, want %q", tc.val, got, tc.want)
+		}
 	}
 }
 

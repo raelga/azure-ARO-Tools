@@ -65,6 +65,30 @@ func (e *EV2RetryableError) Unwrap() error {
 	return e.Cause
 }
 
+// EV2InfraRetryableMarker is the fixed, matchable substring prow-job-executor emits when a
+// gating job failed in a shared multi-stage pre-step (e.g. aro-hcp-lease-acquire exhausting
+// the e2e slot pool) before the aro-hcp-tests binary ever ran, and so is eligible for the
+// same bounded, single automatic EV2 retry as a KnownIssueEligible failure - see
+// InfraPreconditionEligible. Kept distinct from EV2RetryableMarker (rather than reusing it)
+// so the two retry causes stay independently observable in the step's captured output.
+const EV2InfraRetryableMarker = "ev2-retryable-infra-precondition-failure"
+
+// EV2InfraRetryableError wraps a job failure where no step's finished.json ever reported
+// aro-hcp-tests results at all, meaning the failure happened before any test could run.
+// Its Error() text always contains EV2InfraRetryableMarker, so EV2's
+// automatedRetry.errorContainsAny can match on it and re-run the gating step.
+type EV2InfraRetryableError struct {
+	Cause error
+}
+
+func (e *EV2InfraRetryableError) Error() string {
+	return fmt.Sprintf("%s: %s", EV2InfraRetryableMarker, e.Cause.Error())
+}
+
+func (e *EV2InfraRetryableError) Unwrap() error {
+	return e.Cause
+}
+
 // Monitor handles job execution and monitoring
 type Monitor struct {
 	client               *Client
@@ -75,10 +99,10 @@ type Monitor struct {
 	allowEV2Retry        bool
 	maxAutoRetryFailures int
 
-	// checkRetryMarker fetches finished.json for a job's status URL and reports
-	// whether its metadata marks the run as safe to auto-retry. Defaults to
-	// jobAllowsEV2Retry; overridable in tests.
-	checkRetryMarker func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (bool, error)
+	// checkRetryMarker fetches finished.json for a job's status URL and reports whether,
+	// and why, the run is safe to auto-retry. Defaults to jobAllowsEV2Retry; overridable in
+	// tests.
+	checkRetryMarker func(ctx context.Context, jobURL string, maxAutoRetryFailures int) (RetryEligibility, error)
 }
 
 // NewMonitor creates a new job monitor with the specified polling interval and timeout.
@@ -206,11 +230,13 @@ func (m *Monitor) waitForCompletion(ctx context.Context, logger logr.Logger, pro
 
 // ExecuteAndWait submits a job once and waits for completion. It never resubmits the job
 // itself. If the job's JobOutcome comes back Retryable (see JobOutcome) and this Monitor has
-// allowEV2Retry set, it fetches the failed job's finished.json and, if its metadata marks it
-// as safe to retry (only known-issue tests failed, see AROSLSRE-1721), returns an
-// EV2RetryableError instead of the plain job-failure error. The EV2 gating step's
-// pipeline.yaml matches EV2RetryableMarker via automatedRetry.errorContainsAny and re-runs
-// the whole step from scratch - prow-job-executor only decides eligibility, EV2 owns the
+// allowEV2Retry set, it fetches the failed job's finished.json and, depending on what it
+// finds, returns a distinct retryable error instead of the plain job-failure error:
+// EV2RetryableError when only known-issue tests failed (AROSLSRE-1721), or
+// EV2InfraRetryableError when no step ever ran the aro-hcp-tests suite at all (a pre-test
+// infra failure, e.g. lease-acquire capacity exhaustion). The EV2 gating step's
+// pipeline.yaml matches both markers via automatedRetry.errorContainsAny and re-runs the
+// whole step from scratch - prow-job-executor only decides eligibility, EV2 owns the
 // actual retry.
 func (m *Monitor) ExecuteAndWait(ctx context.Context, logger logr.Logger, request *prowgangway.CreateJobExecutionRequest) error {
 	// WaitForCompletion applies m.timeout itself; don't apply it again here too, since a
@@ -235,15 +261,20 @@ func (m *Monitor) ExecuteAndWait(ctx context.Context, logger logr.Logger, reques
 		return outcome.Err
 	}
 
-	retry, checkErr := m.checkRetryMarker(ctx, outcome.JobURL, m.maxAutoRetryFailures)
+	eligibility, checkErr := m.checkRetryMarker(ctx, outcome.JobURL, m.maxAutoRetryFailures)
 	if checkErr != nil {
 		logger.Error(checkErr, "Failed to inspect finished.json for the EV2 retry signal, failing normally", "prowExecutionID", prowExecutionID)
 		return outcome.Err
 	}
-	if !retry {
+
+	switch eligibility {
+	case KnownIssueEligible:
+		logger.Info("finished.json marks the run as safe to retry, failing with the EV2-retryable marker so the gating step's automatedRetry re-runs it", "prowExecutionID", prowExecutionID, "jobURL", outcome.JobURL)
+		return &EV2RetryableError{Cause: outcome.Err}
+	case InfraPreconditionEligible:
+		logger.Info("no step ever ran the aro-hcp-tests suite - treating this as a pre-test infra failure safe to retry once, failing with the EV2 infra-retryable marker", "prowExecutionID", prowExecutionID, "jobURL", outcome.JobURL)
+		return &EV2InfraRetryableError{Cause: outcome.Err}
+	default:
 		return outcome.Err
 	}
-
-	logger.Info("finished.json marks the run as safe to retry, failing with the EV2-retryable marker so the gating step's automatedRetry re-runs it", "prowExecutionID", prowExecutionID, "jobURL", outcome.JobURL)
-	return &EV2RetryableError{Cause: outcome.Err}
 }
